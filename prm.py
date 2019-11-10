@@ -6,6 +6,21 @@ iterations, execution times, figures of merit and method used.
 
 Bob Boehm 2017
 raboehm verizon net
+
+2019-Oct-16:
+    added list of digit precisions, and a loop to cycle through them, to
+    prm_test to allow automatic increase in precision
+
+    added option endearly:  if the first algorithm to finish (prm_mult or
+    prm_sing) is not close enough, end the other and go to the next precision,
+    if it's not the last.  This is disabled by default since testing showed
+    that the prematurely ended algorithm may produce an acceptable result.
+
+    added precdbg to plot or save msf
+
+    bug fix in mpr:  if itr == 2 or change < dtxv  -> if change < dtxv
+
+    bug fixes in several early returns
 """
 
 from multiprocessing import Process, cpu_count, Manager
@@ -18,6 +33,7 @@ import sys
 import math as ma
 import numpy as np
 import mpmath as mp
+import matplotlib.pyplot as plt
 
 ZERO = mp.mpf(0)
 ONE = mp.mpf(1)
@@ -31,7 +47,7 @@ FM28 = "FF8:  val[%d]=%+20.12e %+20.12e j; acc=%+20.12e %+20.12e j;"
 FM39 = "LL:  n=%4i; delta_method=%2i; itr=%4i; dig=%5i; msft=%9.2f; cst=%8.2f;"
 
 
-def prm(poly, delta_method=None, full=False):
+def prm(poly, delta_method=None, full=False, endearly=False):
     """Find roots of a polynomial using two multiple precision methods.
 
     Parameters
@@ -44,6 +60,11 @@ def prm(poly, delta_method=None, full=False):
         if None, defaults to [1, 3]
     full : boolean
         additional output if true
+    endearly : boolean
+        True:  if the first algorithm to finish (prm_mult or prm_sing) is not
+        close enough, end the other and go to the next precision, if it's not
+        the last.
+        False:  if the first to finish is not close enough, wait for the second
 
     y(x) = poly[0]*x^n + poly[1]*x^(n-1) + ... + poly[n-1]*x + poly[n]
 
@@ -69,14 +90,14 @@ def prm(poly, delta_method=None, full=False):
     Notes
     -----
     The goal is to find the roots of a polynomial with arbitrary complex
-    coefficients whose roots may be singular or multiple.  This method (prm)
+    coefficients whose roots may be singular or multiple.  This function (prm)
     starts two separate methods in parallel -- one method converges well when
     all roots are singular, and the second converges better than the first when
     there are multiple roots.
 
     For polynomials with only singular roots, there are many algorithms that
     will find roots simultaneously with varying degrees of rate of convergence.
-    This software (prm_sing) has options for WeierStrass-Durand-Kerner,
+    This method (prm_sing) has options for WeierStrass-Durand-Kerner,
     Aberth-Ehrlich, Sakurai-Torii-Sugiura, and Sakurai-Petkovic, but using the
     test polynomials included (prm_test and polygen), seems to show that
     Sakurai-Torii-Sugiura (delta_sakurai) performed generally the best.
@@ -86,17 +107,18 @@ def prm(poly, delta_method=None, full=False):
 
     For polynomials with multiple roots, the methods for singular roots
     converge much more slowly.  The method here (prm_mult) uses the fact that,
-    for multiplicities greater than one, the polynomial's derivative also has a
-    root there.  This second algorithm finds the roots of the derivative and
-    checks them in the original polynomial.  It is recursive, so all
-    derivatives are checked.  The roots of the derivative are then used as
-    initial root estimates for the polynomial (as this seemed better than using
-    rootmax11).  The Aberth-Ehrlich (delta_aberth) method seems generally the
-    best here, so it is the default.
+    for multiplicities greater than one, the polynomial's derivative has a root
+    at the same point as the original polynomial.  This second algorithm finds
+    the roots of the derivative and checks them in the original polynomial.  It
+    is recursive, so all derivatives are checked.  The roots of the derivative
+    are then used as initial root estimates for the polynomial (as this seemed
+    better than using rootmax11).  The Aberth-Ehrlich (delta_aberth) method
+    seems generally the best here, so it is the default.
 
     If the first algorithm to finish is close enough, the second is stopped.
-    Otherwise, the second is allowed to finish and the better solution is
-    chosen.
+    Otherwise, if endearly is False, the second is allowed to finish and the
+    better solution is chosen.  If endearly is True, the second is ended, and,
+    with no solution, the precision may be increased.
 
     Running prm.py will solve about 70 test polynomials and roots,
     multiplicities, iterations, execution times, figures of merit and method
@@ -137,6 +159,8 @@ def prm(poly, delta_method=None, full=False):
     (array([mpc(real='-1.0', imag='0.0'), mpc(real='0.0', imag='0.0'),
            mpc(real='0.0', imag='0.0'), mpc(real='0.0', imag='0.0')],
            dtype=object), [4, 0, 0, 0], -4000, 4, 'mult')
+
+    prm_test includes code that can be used as an example implementation.
 
     To Do
     -----
@@ -185,7 +209,7 @@ def prm(poly, delta_method=None, full=False):
     for idx in range(procs):
         proc[idx].start()
     cnt = 0
-    # if the first to return meets the solution criterion, kill the other one
+    # if the first to return meets the solution criterion, end the other one
     ec_("Z4:  before while", dbf > 0)
     while prod(flgs) == 0 and cnt < maxloop:
         cnt += 1
@@ -201,7 +225,7 @@ def prm(poly, delta_method=None, full=False):
                 msfts[idx] = namspcs[idx].msft
                 itrs[idx] = namspcs[idx].itr
                 ec_("A2 msfts[%d]=%9.2f;" % (idx, msfts[idx]), dbf > 0)
-                if msfts[idx] < thrsh:
+                if msfts[idx] < thrsh or endearly:
                     flgs[idx] = 2
                     ec_("A3 flgs[%d]=%d;" % (idx, flgs[idx]), dbf > 0)
                     time.sleep(0.1)
@@ -210,7 +234,7 @@ def prm(poly, delta_method=None, full=False):
                         zout = np.append(zout, ZERO)
                         mlts[idx] = np.append(mlts[idx], 0)
                         zout, mlts[idx] = apprtsat0(zout, mlts[idx], rtsat0)
-                    killprocs(proc)
+                    endprocs(proc)
                     retval = zout, mlts[idx], msfts[idx], itrs[idx], typ[idx]
         if max(flgs) == 2 or prod(flgs) == 1:
             break
@@ -219,7 +243,7 @@ def prm(poly, delta_method=None, full=False):
     ec_("Z6:  after while; cnt=%6d;" % (cnt), dbf > 0)
     if sum(flgs) == 0:      # all processes still running
         ec_("Processes still running:  cnt=%6d/%10d;" % (cnt, maxloop))
-        killprocs(proc)
+        endprocs(proc)
     elif max(flgs) == 1:    # no msfts[idx] < thrsh, return better one
         idx = msfts.index(min(msfts))
         ec_("Cx idx=%d;" % (idx), dbf > 0)
@@ -228,7 +252,7 @@ def prm(poly, delta_method=None, full=False):
             zout = np.append(zout, ZERO)
             mlts[idx] = np.append(mlts[idx], 0)
             zout, mlts[idx] = apprtsat0(zout, mlts[idx], rtsat0)
-        killprocs(proc)
+        endprocs(proc)
         retval = zout, mlts[idx], msfts[idx], itrs[idx], "(" + typ[idx] + ")"
     ec_("Z7:  before return;", dbf > 0)
     if full:
@@ -253,8 +277,8 @@ def apprtsat0(zout, mlt, rtsat0):
     return zout, mlt
 
 
-def killprocs(proc):
-    """Kill all background processes."""
+def endprocs(proc):
+    """end all background processes."""
     dbf = 0
     for j, _ in enumerate(proc):
         fmt = "A4 before proc[%d].is_alive()=%d;"
@@ -415,12 +439,13 @@ def prm_mult(poly, delta_method):
             ec_(FM11 % (npoly), dbf > 0)                          # test 2
             prntz(znew, mlt, dbf > 0)                             # test 2
 
-        zout, _, itr = mpr(poly, polyd, znew, mlt, dbf, delta_method)     # ---
+        zout, msf, itr = mpr(poly, polyd, znew, mlt, dbf, delta_method)   # ---
 
         ec_("KK", dbf > 2)
         msft = msemsf(poly, zout, mlt)
         cst = time.time() - cst
         ec_(FM39 % (npoly, delta_method, itr, mp.mp.dps, msft, cst), dbf > 0)
+        precdbg("mult", npoly, msf, itr)
         # npoly >= 3:
     prntz(zout, mlt, dbf > 0)       # 1
     ec_("XX", dbf > 0)
@@ -482,13 +507,32 @@ def prm_sing(poly, delta_method):
     ec_("BB5:  znew estimate", dbf > 2)
     ec_(FM11 % (npoly), dbf > 0)                                  # test 2
     mlt = [1] * npoly
-    zout, _, itr = mpr(poly, polyd, znew, mlt, dbf, delta_method)         # ---
+    zout, msf, itr = mpr(poly, polyd, znew, mlt, dbf, delta_method)       # ---
     ec_("KK", dbf > 2)
     msft = msemsf(poly, zout, mlt)
     cst = time.time() - cst
     ec_(FM39 % (npoly, delta_method, itr, mp.mp.dps, msft, cst), dbf > 0)
     ec_("WW", dbf > 0)
+    precdbg("sing", npoly, msf, itr)
     return zout, mlt, msft, itr
+
+
+def precdbg(src, npoly, msf, itr):
+    """plot msf or write it to file"""
+    if True:
+        return
+    fil = "prm_%s-%d-%d-" % (src, npoly, mp.mp.dps) + datm()
+    plt.figure()
+    plt.plot(msf[1:(itr+1)])
+    plt.title(fil)
+    plt.draw()
+    plt.savefig(fil + ".pdf", bbox_inches="tight")
+
+    with open(fil + ".txt", 'a') as fid:
+        fmt = "mp.mp.dps=%9d;"
+        for msfi in msf[range(itr + 1)]:
+            print("%9.2f" % (msfi), file=fid)
+    return
 
 
 def polytrim(poly):
@@ -518,13 +562,13 @@ def mpr(poly, polyd, znew, mlt, dbf, delta_method):
     zeroes = mpmpc([0] * npoly)
     itera = 1000
     change_tol = mp.mpf(10) ** (-mp.mp.dps // 2)
-    msf = np.ones(itera) * 10000
+    msf = np.ones(itera) * 1000000
     polydd = np.polyder(polyd)
     brkflg = 0
     itr = 0
     for itr in np.arange(1, itera):
         zold = np.copy(znew)
-        change = 0
+        change = ZERO
         fmt = "CC:   n=%d; itr=%d; digits=%d;"
         ec_(fmt % (npoly, itr, mp.mp.dps), dbf > 2)
         delta = np.copy(zeroes)
@@ -566,11 +610,11 @@ def mpr(poly, polyd, znew, mlt, dbf, delta_method):
             dvt = np.abs(znew[jji]) + zoabs[jji]
             if dvt == ZERO:
                 ec_("np.abs(znew[jji])+np.abs(zold[jji]) is zero")
-                return
+                return zold, msemsf(poly, zold, mlt), itr
             dtxv = np.abs(delta[jji]) / dvt
             fmt = "FF11:  n=%d; itr=%3d; jji=%3d; dvt=%15.9e"
             ec_(fmt % (npoly, itr, jji, dvt), dbf > 3)
-            if itr == 2 or change < dtxv:
+            if change < dtxv:
                 change = dtxv
             ec_("FF12", dbf > 3)
             znew[jji] = zold[jji] + delta[jji]
@@ -619,7 +663,7 @@ def delta_weierstrass(poly, zold, zoabs, val, mlt, jji, itr, dbf):
     ec_("FF1", dbf > 3)
     if acc == ZERO:
         ec_("FF6:  acc is zero")
-        return
+        return ZERO
     ec_("FF7:  acc is one", (mp.fabs(acc - 1) < mp.mpf(0.01)))
     delta = -val / acc
     ec_(FM28 % (jji, val.real, val.imag, acc.real, acc.imag), dbf > 3)
@@ -643,7 +687,7 @@ def delta_aberth(poly, zold, zoabs, val, vald, mlt, jji, itr, dbf):
             dvt = zold[jji] - zold[kki]
             if dvt == ZERO:
                 ec_("zold[delta_method,jji]-zold[delta_method,kki] is zero")
-                return
+                return ZERO
             one_dvx = mp.mpf(mlt[kki]) / dvt
             acc += one_dvx
     ec_("FF1", dbf > 3)
@@ -716,7 +760,7 @@ def dels_sums(poly, zold, zoabs, val, vald, valdd, mlt, jji, itr, dbf):
             dvt = zold[jji] - zold[kki]
             if dvt == ZERO:
                 ec_("Zo[ab,jj]-Zo[ab,kk] is zero")
-                return
+                return ZERO, ZERO, ZERO, ZERO
             # will this work for delta_method == 3?
             one_dvx = mp.mpf(mlt[kki]) / dvt
             sum1 += one_dvx
@@ -906,6 +950,13 @@ def mpmpc(inlist):
     return outlist
 
 
+def datm():
+    """Create a timestamp"""
+    yr, mx, da, hr, mi, se = time.strftime("%y %m %d %H %M %S").split()
+    mo = "%x" % (int(mx))
+    return yr + mo + da + '_' + hr + mi + se
+
+
 def polysets(ntest=False):
     """generate list of tests"""
     x00 = list(range(-1, -15, -1))                      # simple ones for prm
@@ -918,7 +969,7 @@ def polysets(ntest=False):
     t00 = [45, 50, 60, 70, 80]                          # multiple roots
 
     # The v00 set can take long, and 89 and 90 can take even longer.
-    v00 = [81, 82, 83, 84, 85, 86, 88, 91, 92, 93, 89, 90]  # 87
+    v00 = [81, 82, 83, 84, 85, 86, 88, 91, 92, 93, 89, 90, 87]
     # v01 = list(range(81, 87)) + list(range(88, 94))
     # v04 = list(range(81, 87))
     # v02 = list(range(90, 94))
@@ -950,9 +1001,6 @@ def polysets(ntest=False):
 def prm_test():
     """Perform test of prm using a set of polynomials."""
     dbf = 1
-    mp.mp.dps = 1000
-    mp.mp.dps = 10000
-    mp.mp.dps = 2000
 
     fme = "=================================================================\n"
     fmd = "-----------------------------------------------------------------\n"
@@ -962,22 +1010,37 @@ def prm_test():
     for polyn in polyset:
         for npol in nset:
             prnt(fme, dbf > 0)
-            cpg = time.time()
-            poly, npoly, mls = polygen(polyn, npol)
-            cpg = time.time() - cpg
-            if dbf > 1:
-                znn = rootmax11(poly)
-                zvv = np.sort(np.array(znn, dtype=complex))
-                for idx in np.arange(npoly):
-                    fmt = 'zvv[%2d] = %+20.12e %+20.12e j;'
-                    ec_(fmt % (idx, zvv[idx].real, zvv[idx].imag))
-                prnt(fmd)
-            # continue                            # uncomment for rootmax only
 
-            cst = time.time()
-            (znew, mlt, msf, num_iter, tstr) = prm(poly, delta_method=[1, 3],
-                                                   full=True)
-            cst = time.time() - cst
+            # -------- example implementation code start
+            # dpss is a list of digit precisions to use
+            dpss=[1000, 10000, 100000]
+            for dps in dpss:
+                mp.mp.dps = dps
+                thrsh = -dps * 0.80   # originally 0.95
+
+                cpg = time.time()
+                poly, npoly, mls = polygen(polyn, npol)
+                cpg = time.time() - cpg
+                if dbf > 1:
+                    znn = rootmax11(poly)
+                    zvv = np.sort(np.array(znn, dtype=complex))
+                    for idx in np.arange(npoly):
+                        fmt = 'zvv[%2d] = %+20.12e %+20.12e j;'
+                        ec_(fmt % (idx, zvv[idx].real, zvv[idx].imag))
+                    prnt(fmd)
+                # continue                        # uncomment for rootmax only
+
+                cst = time.time()
+                (znew, mlt, msf, num_iter, tstr) = prm(poly,
+                        delta_method=[1, 3], full=True,
+                        endearly=False)
+                        # endearly=dps < dpss[-1])
+                cst = time.time() - cst
+                ec_("dps=%8d; msf=%9.2f; sec=%9.2f" % (dps, msf, cst))
+                if msf < thrsh:
+                    break
+            # -------- example implementation code end
+
             mltf = "no"
             for jji in np.arange(len(mlt)):
                 if mlt[jji] > 1:
@@ -1053,8 +1116,6 @@ def polygen(polyn=-1, npoly=None):
                       mp.mpf(-152325066937821) / mp.mpf(18014398509481984),
                       mp.mpf(1520316102106201) / mp.mpf(9007199254740992),
                       mp.mpf(1) / mp.mpf(36028797018963968)])
-        mls = "no"
-
     elif polyn == 1:
         if npoly is None:
             npoly = 30
@@ -1239,6 +1300,8 @@ def polygen(polyn=-1, npoly=None):
         # numpy.linalg.linalg.LinAlgError: Array must not contain infs or NaNs
         # This means that "roots" can't be called on this polynomial.
         # This does not converge with any good values -- msf = 392
+        # 2019-Aug-19:  mp.mp.dps = 100000 gets msf = -94000 in 1038 sec!
+        # 2019-Aug-19:  mp.mp.dps = 1000000 gets msf = -994000 in 15874 sec!
         if npoly is None:
             npoly = 20
         poly = mpmpc([0] * (npoly + 1))
@@ -1341,11 +1404,11 @@ def polygen(polyn=-1, npoly=None):
         npoly = polyn - (k - 100)
         if polyn == k - 4:
             npoly = 100
-        if polyn == k - 3:
+        if polyn == k - 3:              # 197
             npoly = 500                 # this one doesn't seem to work
-        if polyn == k - 2:
+        if polyn == k - 2:              # 198
             npoly = 1000
-        if polyn == k - 1:
+        if polyn == k - 1:              # 199
             npoly = 2000
         poly = mpmpc([0] * (npoly + 1))
         for kki in range(npoly + 1):
